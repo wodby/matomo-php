@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+
+# Installs a Matomo release into the empty application directory of an image
+# built on wodby/matomo-php, with Wodby's additions: the WodbyInstall plugin,
+# the GeoLite database, Matomo's .htaccess files and the links to the files
+# directory. The release is downloaded from builds.matomo.org and its
+# signature is checked.
+#
+# Runs as root during an image build:
+#
+#   USER root
+#   RUN matomo-install-release 5.14.2
+#   USER wodby
+
+set -eo pipefail
+
+if [[ -n "${DEBUG}" ]]; then
+    set -x
+fi
+
+version="${1}"
+share=/usr/local/share/matomo
+
+# Matomo's releases look like 5.14.2, 5.0.0-b1 or 5.0.0-rc2.
+if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(b|rc)[0-9]+)?$ ]]; then
+    echo "Set a Matomo release version such as 5.14.2, not \"${version}\"" >&2
+    exit 1
+fi
+# Wodby's installation and update scripts are made for these major versions.
+if [[ " ${MATOMO_MAJOR_VERSIONS} " != *" ${version%%.*} "* ]]; then
+    echo "This image supports Matomo ${MATOMO_MAJOR_VERSIONS// /, }, not Matomo ${version%%.*}: pin a supported version" >&2
+    exit 1
+fi
+if [[ -n "$(ls -A "${APP_ROOT}")" ]]; then
+    echo "${APP_ROOT} is not empty, so it can't take a Matomo release" >&2
+    exit 1
+fi
+
+tmp=$(mktemp -d)
+echo "Downloading Matomo ${version}"
+curl -fsSL -o "${tmp}/matomo.tar.gz" "https://builds.matomo.org/matomo-${version}.tar.gz"
+curl -fsSL -o "${tmp}/matomo.tar.gz.asc" "https://builds.matomo.org/matomo-${version}.tar.gz.asc"
+GPG_KEYS=F529A27008477483777FC23D63BB30D0E5D2C749 gpg_verify "${tmp}/matomo.tar.gz.asc" "${tmp}/matomo.tar.gz"
+tar zxf "${tmp}/matomo.tar.gz" --strip-components=1 -C "${APP_ROOT}"
+rm -rf "${tmp}"
+
+cd "${APP_ROOT}"
+
+mkdir -p \
+    tmp/assets \
+    tmp/cache/tracker \
+    tmp/climulti \
+    tmp/latest \
+    tmp/logs \
+    tmp/sessions \
+    tmp/tcpdf \
+    tmp/templates_c
+
+chown -R wodby:wodby "${APP_ROOT}"
+chmod 775 config misc/user piwik.js
+chmod -R 775 tmp plugins
+
+cp "${share}/geolite/GeoLite2-City.mmdb" misc/
+cp -R "${share}/plugins/WodbyInstall" plugins/
+
+# Matomo's .htaccess files for its code directories. Matomo writes them
+# itself during installation and updates, but quietly fails when the code
+# isn't writable, so they are part of the image.
+php console core:create-security-files
+
+# Links to the files directory: the settings Matomo writes, custom logos and
+# Marketplace plugins.
+ln -s "${FILES_DIR}/config/config.ini.php" config/config.ini.php
+rm -rf misc/user
+ln -s "${FILES_DIR}/misc-user" misc/user
+ln -s "${FILES_DIR}/plugins" marketplace-plugins
+
+chown -hR wodby:wodby "${APP_ROOT}"
+
+echo "Installed Matomo ${version}"
